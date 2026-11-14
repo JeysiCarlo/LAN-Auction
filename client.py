@@ -46,6 +46,7 @@ class AuctionClient(BanyanBase):
     def incoming_message_processing(self, topic, payload):
         if topic == "auction/update":
             print("\n--Auction Update--")
+            print("Item:", payload["ItemName"])
             print("Bidder:", payload["Bidder"])
             print("Amount(PHP):", payload["Amount"])
             print("-------------------------------")

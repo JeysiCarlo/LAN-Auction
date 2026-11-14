@@ -1,7 +1,7 @@
-from python_banyan.banyan_base import BanyanBase
-import sys
 import queue
+import sys
 import threading
+from python_banyan.banyan_base import BanyanBase
 
 class AuctionServer(BanyanBase):
     def __init__(self):
@@ -56,7 +56,7 @@ class AuctionServer(BanyanBase):
                     print("\nID:", item_id)
                     print("Item:", item["Item"])
                     print("Seller:", item["Seller"])
-                    print("Starting Price(PHP):", item["Starting Price"])
+                    print("Starting Price(PHP):", item["StartingPrice"])
                     print("Status:", item["Status"])
             elif action in ["approve", "reject", "start"]:
                 if len(parts) != 2 or not parts[1].isdigit():
@@ -87,19 +87,26 @@ class AuctionServer(BanyanBase):
                         print("Another auction is already active")
                         continue
                     item["Status"] = "active"
+                    item["CurrentPrice"] = item["StartingPrice"]
+                    item["HighestBidder"] = None
                     self.active_item_id = item_id
                     self.publish_payload(item, "auction/item/update")
                     print("\nAuction Started!")
                     print("Item:", item["Name"])
-                elif action == "stop":
-                    if self.active_item_id is None:
-                        print("There is no active auction")
-                        continue
-                    item = self.items[self.active_item_id]
-                    item["Status"] = "completed"
-                    self.publish_payload(item, "auction/item/update")
-                    print("Auction Ended:", item["Name"])
-                    self.active_item_id = None
+            elif action == "stop":
+                if self.active_item_id is None:
+                    print("No active auction to stop.")
+                    continue
+                item = self.items[self.active_item_id]
+                item["Status"] = "completed"
+                if item["HighestBidder"] is not None:
+                    print("Winner:", item["HighestBidder"])
+                    print("Winning Bid(PHP):", item["CurrentPrice"])
+                else:
+                    print("No bids were placed for this item.")
+                print("------------------------------------------")
+                self.publish_payload(item, "auction/item/update")
+                self.active_item_id = None
             elif action == "help":
                 print("\nAvailable commands:")
                 print("list")
@@ -122,13 +129,13 @@ class AuctionServer(BanyanBase):
                 "Seller",
                 "Name",
                 "Description",
-                "Starting Price"
+                "StartingPrice"
             ]
             if not all(field in payload for field in required_fields):
                 print("Invalid item submission")
                 return
             try:
-                starting_price = float(payload["Starting Price"])
+                starting_price = float(payload["StartingPrice"])
                 if starting_price <= 0:
                     print("Starting price must be greater than zero.")
                     return
@@ -147,21 +154,53 @@ class AuctionServer(BanyanBase):
             }
             self.items[item_id] = item
             print("\n========== NEW ITEM ==========")
-    print("Item ID:", item_id)
-    print("Item:", item["Name"])
-    print("Seller:", item["Seller"])
-    print("Starting Price: PHP", item["StartingPrice"])
-    print("Status: Pending approval")
-    print("==============================")
+            print("Item ID:", item_id)
+            print("Item:", item["Name"])
+            print("Seller:", item["Seller"])
+            print("Starting Price: PHP", item["StartingPrice"])
+            print("Status: Pending approval")
+            print("==============================")
         if topic == "auction/bid":
-            if isinstance(payload, dict):
-                print("Payload keys:", [repr(key) for key in payload.keys()])
-            if isinstance(payload, dict) and "Bidder" in payload and "Amount" in payload:
-                print("New bid received!")
-                print("Bidder:", payload["Bidder"])
-                print("Amount:", payload["Amount"])
-                self.publish_payload(payload, "auction/update")
-            else:
-                print("Invalid bid format")
+            if self.active_item_id is None:
+                print("Bid rejected: There is no active auction.")
+                return
+            if not isinstance(payload, dict):
+                print("Invalid bid submission")
+                return
+            if "Bider" not in payload or "Amount" not in payload:
+                print("Invalid bid submission")
+                return
+            if self.active_item_id is None:
+                print("No active auction. Bid rejected.")
+                return
+            bidder = str(payload["Bider"]).strip()
+            if not bidder:
+                print("Bidder name cannot be empty. Bid rejected.")
+                return
+            try:
+                amount = float(payload["Amount"])
+            except (ValueError, TypeError):
+                print("Bid rejected: Invalid bid amount.")
+            if amount <= 0:
+                print("Bid rejected: Amount must be not zero or lower than it")
+                return
+            item = self.items[self.active_item_id]
+            if amount <= item["CurrentPrice"]:
+                print("Bid rejected: you must bid higher than the current bid.", item["CurrentBid"])
+                return
+            item["CurrentPrice"] = amount
+            item["HighestBidder"] = bidder
+            bid_update = {
+                "ItemID": self.active_item_id,
+                "ItemName": item['Name'],
+                "Bidder": bidder,
+                "Amount": amount
+            }
+            print("\n========== NEW HIGHEST BID ==========")
+            print("Item:", item["Name"])
+            print("Bidder:", bidder)
+            print("Amount: PHP", amount)
+            print("=====================================")
+            self.publish_payload(bid_update, "auction/update")
 if __name__ == "__main__":
     AuctionServer()
