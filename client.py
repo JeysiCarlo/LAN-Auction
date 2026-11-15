@@ -4,6 +4,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 import sys
 import queue
 import threading
+import uuid
 class AuctionClient(BanyanBase):
     def __init__(self, role, name):
         self.outgoing_queue = queue.Queue()
@@ -11,12 +12,15 @@ class AuctionClient(BanyanBase):
         self.name = name
         self.console_lock = threading.Lock()
         self.message_processed = threading.Event()
+        self.client_id = uuid.uuid4().hex
+        self.bid_response_topic = f"auction/bid/response/{self.client_id}"
         super().__init__(
             process_name = "Auction Client",
             receive_loop_idle_addition = self.process_pending_messages
         )
         self.set_subscriber_topic("auction/update")
         self.set_subscriber_topic("auction/item/update")
+        self.set_subscriber_topic(self.bid_response_topic)
         print("\nWelcome to the LAN Auction System")
         print("Role:", self.role.capitalize())
         print("Name:", self.name)
@@ -71,32 +75,34 @@ class AuctionClient(BanyanBase):
             self.message_processed.wait()
             self.message_processed.clear()
     def get_bid_amounts(self):
-        while True:
-            try:
-                amount = float(
-                    prompt("Enter your bid amount (PHP): ")
-                )
-                if amount <= 0:
-                    print("Bid amount must not be zero or less")
-                    continue
-                bid = {
-                    "Bidder": self.name,
-                    "Amount": amount
-                }
-                self.outgoing_queue.put(
-                    ("auction/bid", bid)
-                )
-                threading.Event().wait(0.2)
-            except ValueError:
-                print("Invalid input. Please enter a valid number.")
+        try:
+            while True:
+                try:
+                    amount = float(
+                        prompt("Enter your bid amount (PHP): ")
+                    )
+                    if amount <= 0:
+                        print("Bid amount must not be zero or less")
+                        continue
+                    bid = {
+                        "ClientID": self.client_id,
+                        "Bidder": self.name,
+                        "Amount": amount
+                    }
+                    self.outgoing_queue.put(
+                        ("auction/bid", bid)
+                    )
+                except ValueError:
+                    print("Invalid input. Please enter a valid number.")
+        except KeyboardInterrupt:
+            print("\nBid input stopped.")
+
     def process_pending_messages(self):
         while not self.outgoing_queue.empty():
             topic, payload = self.outgoing_queue.get()
             self.publish_payload(payload, topic)
             if topic == "auction/item/submit":
                     print("\nItem submission sent to the server.")
-            elif topic == "auction/bid":
-                    print("\nYour bid has been submitted.")
             self.message_processed.set()
     def incoming_message_processing(self, topic, payload):
         if topic == "auction/item/update":
@@ -126,6 +132,14 @@ class AuctionClient(BanyanBase):
             print("Bidder:", payload.get("Bidder", "Unknown"))
             print("Amount (PHP):", payload.get("Amount", "Unknown"))
             print("------------------------------------------")
+        elif topic == self.bid_response_topic:
+            if not isinstance(payload, dict):
+                return
+            message = payload.get("Message", "No response message.")
+            if payload.get("Accepted"):
+                print("\n[BID ACCEPTED]", message)
+            else:
+                print("\n[BID REJECTED]", message)
 def get_user_details():
     print("-------------------------------------")
     print("            LAN AUCTION              ")

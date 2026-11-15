@@ -1,6 +1,7 @@
 import queue
 import sys
 import threading
+import time
 from python_banyan.banyan_base import BanyanBase
 from prompt_toolkit import prompt
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -15,6 +16,9 @@ class AuctionServer(BanyanBase):
         self.auction_history = {}
         self.next_item_id = 1
         self.active_item_id = None
+        self.auction_duration = 30
+        self.auction_deadline = None
+        self.timer_thread = None
         super().__init__(
             process_name = "Auction Server",
             receive_loop_idle_addition = self.process_admin_commands
@@ -236,31 +240,46 @@ class AuctionServer(BanyanBase):
             print("Status: Pending approval")
             print("==============================")
         if topic == "auction/bid":
-            if self.active_item_id is None:
-                print("Bid rejected: There is no active auction.")
-                return
             if not isinstance(payload, dict):
                 print("Invalid bid: payload is not a dictionary.")
                 return
-            print("DEBUG bid keys:", list(payload.keys()))
+            client_id = payload.get("ClientID")
+            if not client_id:
+                print("Invalid bid: missing ClientID.")
+                return
+            if self.active_item_id is None:
+                message = "There is no active auction."
+                print("Bid rejected:", message)
+                self.send_bid_response(client_id, False, message)
+                return
             if "Bidder" not in payload or "Amount" not in payload:
-                print("Invalid bid: missing Bidder or Amount.")
+                message = "Missing Bidder or Amount."
+                print("Bid rejected:", message)
+                self.send_bid_response(client_id, False, message)
                 return
             bidder = str(payload["Bidder"]).strip()
             if not bidder:
-                print("Bidder name cannot be empty. Bid rejected.")
+                message = "Bidder name cannot be empty."
+                print("Bid rejected:", message)
+                self.send_bid_response(client_id, False, message)
                 return
             try:
                 amount = float(payload["Amount"])
             except (ValueError, TypeError):
-                print("Bid rejected: Invalid bid amount.")
+                message = "Invalid bid amount."
+                print("Bid rejected:", message)
+                self.send_bid_response(client_id, False, message)
                 return
             if amount <= 0:
-                print("Bid rejected: Amount must be not zero or lower than it")
+                message = "Bid amount must be greater than zero."
+                print("Bid rejected:", message)
+                self.send_bid_response(client_id, False, message)
                 return
             item = self.items[self.active_item_id]
             if amount <= item["CurrentPrice"]:
-                print("Bid rejected: you must bid higher than the current bid.", item["CurrentPrice"])
+                message = f"You must bid higher than the current bid of PHP {item['CurrentPrice']}."
+                print("Bid rejected:", message)
+                self.send_bid_response(client_id, False, message)
                 return
             item["CurrentPrice"] = amount
             item["HighestBidder"] = bidder
@@ -270,15 +289,34 @@ class AuctionServer(BanyanBase):
             })
             bid_update = {
                 "ItemID": self.active_item_id,
-                "ItemName": item['Name'],
+                "ItemName": item["Name"],
                 "Bidder": bidder,
                 "Amount": amount
             }
-            print("\n========== NEW HIGHEST BID ==========")
+            print("\n-------------New Highest Bid-------------------")
             print("Item:", item["Name"])
             print("Bidder:", bidder)
             print("Amount: PHP", amount)
-            print("=====================================")
+            print("-------------------------------------------------")
+            self.send_bid_response(
+                client_id,
+                True,
+                f"Your bid of PHP {amount} was accepted!"
+            )
             self.publish_payload(bid_update, "auction/update")
+    def send_bid_response(self, client_id,accepted, message):
+        response ={
+            "Accepted": accepted,
+            "Message": message
+        }
+        response_topic = f"auction/bid/response/{client_id}"
+        self.publish_payload(response, response_topic)
+    def auction_timer(self):
+        while self.active_item_id is not None:
+            remaining = self.auction_deadline - time.monotonic()
+            if remaining <= 0:
+                self.admin_commands.put("timer_stop")
+                break
+            time.sleep(0.2)
 if __name__ == "__main__":
     AuctionServer()
