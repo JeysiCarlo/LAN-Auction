@@ -3,62 +3,143 @@ import sys
 import queue
 import threading
 class AuctionClient(BanyanBase):
-    def __init__(self, bidder):
-        self.bid_queue = queue.Queue()
-        self.bidder = bidder
+    def __init__(self, role, name):
+        self.outgoing_queue = queue.Queue()
+        self.role = role
+        self.name = name
+        self.console_lock = threading.Lock()
         super().__init__(
             process_name = "Auction Client",
-            receive_loop_idle_addition = self.process_pending_bids
+            receive_loop_idle_addition = self.process_pending_messages
         )
         self.set_subscriber_topic("auction/update")
-        print("\nWelcome to the Auction", self.bidder)
-        print("You can now enter multiple bids")
-        print("Press Ctrl C to exit the auction.\n")
-        input_thread = threading.Thread(
-            target = self.get_bid_amounts,
-            daemon = True
-        )
+        self.set_subscriber_topic("auction/item/update")
+        print("\nWelcome to the LAN Auction System")
+        print("Role:", self.role.capitalize())
+        print("Name:", self.name)
+        print("Press Ctrl + C to exit.\n")
+        if self.role == "seller":
+            input_thread = threading.Thread(
+                target = self.get_item_details,
+                daemon = True
+            )
+        else:
+            input_thread = threading.Thread(
+                target = self.get_bid_amounts,
+                daemon = True
+            )
         input_thread.start()
         try:
             self.receive_loop()
         except KeyboardInterrupt:
             print("\nShutting down client...")
             sys.exit(0)
+    def get_item_details(self):
+        while True:
+            print("\n------Submit an Item------")
+            item_name = input("Item name: ").strip()
+            while not item_name:
+                print("Item name cannot be empty.")
+                item_name = input("Item name: ").strip()
+            description = input("item description: ").strip()
+            while not description:
+                print("Description cannot be empty.")
+                description = input("Item description: ").strip()
+            try:
+                starting_price = float(
+                    input("Starting price(PHP): ")
+                )
+                if starting_price <= 0:
+                    print("Must not be zero or less than zero")
+                    continue
+            except ValueError:
+                print("Invalid price. Please enter a number.")
+                continue
+            item = {
+                "Seller": self.name,
+                "Name": item_name,
+                "Description": description,
+                "StartingPrice": starting_price
+            }
+            self.outgoing_queue.put(
+                ("auction/item/submit", item)
+            )
     def get_bid_amounts(self):
         while True:
             try:
-                amount = float(input("Enter your bid amount(PHP): "))
+                amount = float(
+                    input("Enter your bid amount (PHP): ")
+                )
                 if amount <= 0:
-                    print("Bid amount must be greater than zero.")
+                    print("Bid amount must not be zero or less")
                     continue
-                self.bid_queue.put(amount)
+                bid = {
+                    "Bidder": self.name,
+                    "Amount": amount
+                }
+                self.outgoing_queue.put(
+                    ("auction/bid", bid)
+                )
             except ValueError:
                 print("Invalid input. Please enter a valid number.")
-    def process_pending_bids(self):
-        while not self.bid_queue.empty():
-            amount = self.bid_queue.get()
-            bid = {
-                "Bidder": self.bidder,
-                "Amount": amount
-            }
-            self.publish_payload(bid, "auction/bid")
-            print("\nYour bid has been submitted.")
+    def process_pending_messages(self):
+        while not self.outgoing_queue.empty():
+            topic, payload = self.outgoing_queue.get()
+            self.publish_payload(payload, topic)
+            with self.console_lock:
+                if topic == "auction/item/submit":
+                    print("\nItem submission sent to the server.")
+                elif topic == "auction/bid":
+                    print("\nYour bid has been submitted.")
     def incoming_message_processing(self, topic, payload):
-        if topic == "auction/update":
-            print("\n--Auction Update--")
-            print("Item:", payload["ItemName"])
-            print("Bidder:", payload["Bidder"])
-            print("Amount(PHP):", payload["Amount"])
-            print("-------------------------------")
-def get_bidder_name():
-    print("-----------------------------------")
-    print("          Auction Client")
-    print("-----------------------------------")
-    bidder = input("Enter your name: ").strip()
-    while not bidder:
-        print("Name cannot be empty. Please enter a valid name.")
-        bidder = input("Enter your name: ").strip()
-    return bidder
+        if topic == "auction/item/update":
+            if not isinstance(payload, dict):
+                return
+            print("\n------Auction Item Update-------")
+            print("Item:", payload.get("Name", "Unknown"))
+            print("Seller:", payload.get("Seller", "Unknown"))
+            print("Starting Price(PHP);",
+                payload.get("StartingPrice", "Unknown"))
+            print("Status", payload.get("Status", "Unknown"))
+            if payload.get("Status") == "active":
+                print("Current Price(PHP):",
+                    payload.get("CurrentPrice","Unknown"))
+            elif payload.get("Status") == "completed":
+                print("Auction has ended.")
+                print("Winner:",
+                    payload.get("HighestBidder") or "No bids")
+                print("Final Price (PHP):",
+                    payload.get("CurrentPrice","Unknown"))
+            print("----------------------------------------")
+        elif topic == "auction/update":
+            if not isinstance(payload, dict):
+                    return
+            print("\n---New Highest Bid---")
+            print("Item:", payload.get("ItemName","Unknown"))
+            print("Bidder:", payload.get("Bidder", "Unknown"))
+            print("Amount (PHP):", payload.get("Amount", "Unknown"))
+            print("------------------------------------------")
+def get_user_details():
+    print("=====================================")
+    print("            LAN AUCTION              ")
+    print("=====================================")
+    print("1. Seller")
+    print("2. Bidder")
+    while True:
+        choice = input("Select your role: ").strip()
+        if choice == "1":
+            role = "seller"
+            break
+        elif choice == "2":
+            role ="bidder"
+            break
+        else:
+            print("Invalid Selection. Choose either 1 or 2.")
+    name = input("Enter your name: ").strip()
+    while not name:
+        print("Name cannot be empty.")
+        name = input("Enter your name: ").strip()
+    return role, name
 if __name__ == "__main__":
-    bidder = get_bidder_name()
-    AuctionClient(bidder)
+    role, name = get_user_details()
+    AuctionClient(role, name)
