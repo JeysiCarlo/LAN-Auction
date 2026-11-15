@@ -1,4 +1,6 @@
 from python_banyan.banyan_base import BanyanBase
+from prompt_toolkit import prompt
+from prompt_toolkit.patch_stdout import patch_stdout
 import sys
 import queue
 import threading
@@ -8,6 +10,7 @@ class AuctionClient(BanyanBase):
         self.role = role
         self.name = name
         self.console_lock = threading.Lock()
+        self.message_processed = threading.Event()
         super().__init__(
             process_name = "Auction Client",
             receive_loop_idle_addition = self.process_pending_messages
@@ -28,26 +31,27 @@ class AuctionClient(BanyanBase):
                 target = self.get_bid_amounts,
                 daemon = True
             )
-        input_thread.start()
         try:
-            self.receive_loop()
+            with patch_stdout():
+                input_thread.start()
+                self.receive_loop()
         except KeyboardInterrupt:
             print("\nShutting down client...")
             sys.exit(0)
     def get_item_details(self):
         while True:
             print("\n------Submit an Item------")
-            item_name = input("Item name: ").strip()
+            item_name = prompt("Item name: ").strip()
             while not item_name:
                 print("Item name cannot be empty.")
-                item_name = input("Item name: ").strip()
-            description = input("item description: ").strip()
+                item_name = prompt("Item name: ").strip()
+            description = prompt("item description: ").strip()
             while not description:
                 print("Description cannot be empty.")
-                description = input("Item description: ").strip()
+                description = prompt("Item description: ").strip()
             try:
                 starting_price = float(
-                    input("Starting price(PHP): ")
+                    prompt("Starting price(PHP): ")
                 )
                 if starting_price <= 0:
                     print("Must not be zero or less than zero")
@@ -64,11 +68,13 @@ class AuctionClient(BanyanBase):
             self.outgoing_queue.put(
                 ("auction/item/submit", item)
             )
+            self.message_processed.wait()
+            self.message_processed.clear()
     def get_bid_amounts(self):
         while True:
             try:
                 amount = float(
-                    input("Enter your bid amount (PHP): ")
+                    prompt("Enter your bid amount (PHP): ")
                 )
                 if amount <= 0:
                     print("Bid amount must not be zero or less")
@@ -80,17 +86,18 @@ class AuctionClient(BanyanBase):
                 self.outgoing_queue.put(
                     ("auction/bid", bid)
                 )
+                threading.Event().wait(0.2)
             except ValueError:
                 print("Invalid input. Please enter a valid number.")
     def process_pending_messages(self):
         while not self.outgoing_queue.empty():
             topic, payload = self.outgoing_queue.get()
             self.publish_payload(payload, topic)
-            with self.console_lock:
-                if topic == "auction/item/submit":
+            if topic == "auction/item/submit":
                     print("\nItem submission sent to the server.")
-                elif topic == "auction/bid":
+            elif topic == "auction/bid":
                     print("\nYour bid has been submitted.")
+            self.message_processed.set()
     def incoming_message_processing(self, topic, payload):
         if topic == "auction/item/update":
             if not isinstance(payload, dict):
@@ -120,9 +127,9 @@ class AuctionClient(BanyanBase):
             print("Amount (PHP):", payload.get("Amount", "Unknown"))
             print("------------------------------------------")
 def get_user_details():
-    print("=====================================")
+    print("-------------------------------------")
     print("            LAN AUCTION              ")
-    print("=====================================")
+    print("-------------------------------------")
     print("1. Seller")
     print("2. Bidder")
     while True:
