@@ -14,17 +14,21 @@ class AuctionServer(BanyanBase):
         self.command_processed.set()
         self.items = {}
         self.auction_history = {}
+        self.clients = {}
         self.next_item_id = 1
         self.active_item_id = None
         self.auction_duration = 30
         self.auction_deadline = None
         self.timer_thread = None
+        self.timer_version = 0
         super().__init__(
             process_name = "Auction Server",
             receive_loop_idle_addition = self.process_admin_commands
         )
         self.set_subscriber_topic("auction/bid")
         self.set_subscriber_topic("auction/item/submit")
+        self.set_subscriber_topic("auction/client/join")
+        self.set_subscriber_topic("auction/client/leave")
         admin_thread = threading.Thread(
             target = self.admin_input_loop,
             daemon = True
@@ -60,11 +64,25 @@ class AuctionServer(BanyanBase):
         processed_any = False
         while not self.admin_commands.empty():
             command = self.admin_commands.get()
-            processed_any = True
             parts = command.split()
             if not parts:
                 continue
             action = parts[0].lower()
+            if action != "timer_update":
+                processed_any = True
+            if action == "timer_update":
+                if len(parts) != 3:
+                    continue
+                if int(parts[1]) != self.timer_version:
+                    continue
+                if self.active_item_id is None:
+                    continue
+                timer_update ={
+                    "Remaining": int(parts[2]),
+                    "ItemID": self.active_item_id
+                }
+                self.publish_payload(timer_update, "auction/timer")
+                continue
             if action == "list":
                 if not self.items:
                     print("No items submitted for auction.")
@@ -109,10 +127,30 @@ class AuctionServer(BanyanBase):
                     item["HighestBidder"] = None
                     item["BidHistory"] = []
                     self.active_item_id = item_id
+                    self.auction_deadline = time.monotonic() + self.auction_duration
+                    self.timer_version += 1
+                    current_timer_version = self.timer_version
+                    self.timer_thread = threading.Thread(
+                        target = self.auction_timer,
+                        args = (current_timer_version,),
+                        daemon = True
+                    )
+                    self.timer_thread.start()
                     self.publish_payload(item, "auction/item/update")
                     print("\nAuction Started!")
                     print("Item:", item["Name"])
-            elif action == "stop":
+                    print("Auction duration:", self.auction_duration, "seconds")
+            elif action in ["stop", "timer_stop"]:
+                if action == "timer_stop":
+                    if len(parts) < 2:
+                        continue
+                    if int(parts[1]) != self.timer_version:
+                        continue
+                    if self.auction_deadline is None:
+                        continue
+                    if time.monotonic() < self.auction_deadline:
+                        continue
+                    print("\nAuction Timer Finished!")
                 if self.active_item_id is None:
                     print("No active auction to stop.")
                     continue
@@ -135,6 +173,8 @@ class AuctionServer(BanyanBase):
                 print("------------------------------------------")
                 self.publish_payload(item, "auction/item/update")
                 self.active_item_id = None
+                self.auction_deadline = None
+                self.timer_version += 1
             elif action == "history" and len(parts) == 1:
                 if not self.auction_history:
                     print("No completed auctions yet.")
@@ -200,6 +240,35 @@ class AuctionServer(BanyanBase):
             print("Topic:", topic)
             print("Payload:", repr(payload))
             print("Payload type:", type(payload).__name__)
+        if topic == "auction/client/join":
+            if not isinstance(payload, dict):
+                return
+            client_id = payload.get("ClientID")
+            name = payload.get("Name")
+            if not client_id or not name:
+                return
+            self.clients[client_id] ={
+                "ClientID": client_id,
+                "Name": name,
+                "State": "lobby"
+            }
+            print(f"\n[Lobby] {name} joined the lobby.")
+            lobby_update = {
+                "Clients": list(self.clients.values())
+            }
+            self.publish_payload(lobby_update, "auction,lobby,update")
+        elif topic == "auction/client/leave":
+            if not isinstance(payload, dict):
+                return
+            client_id = payload.get("ClientID")
+            if client_id in self.clients:
+                name = self.clients[self.client_id]["Name"]
+                del self.clients[client_id]
+                print(f"\n[Lobby] {name} left the lobby.")
+                lobby_update = {
+                    "Clients": list (self.clients.values())
+                }
+                self.publish_payload(lobby_update, "auction/lobby/update")
         if topic == "auction/item/submit":
             if not isinstance(payload, dict):
                 print("Invalid item submission")
@@ -287,6 +356,15 @@ class AuctionServer(BanyanBase):
                 "Bidder": bidder,
                 "Amount": amount
             })
+            self.auction_deadline = time.monotonic() + self.auction_duration
+            self.timer_version += 1
+            current_timer_version = self.timer_version
+            self.timer_thread = threading.Thread(
+                target = self.auction_timer,
+                args = (current_timer_version,),
+                daemon = True
+            )
+            self.timer_thread.start()
             bid_update = {
                 "ItemID": self.active_item_id,
                 "ItemName": item["Name"],
@@ -304,19 +382,31 @@ class AuctionServer(BanyanBase):
                 f"Your bid of PHP {amount} was accepted!"
             )
             self.publish_payload(bid_update, "auction/update")
-    def send_bid_response(self, client_id,accepted, message):
-        response ={
+    def send_bid_response(self, client_id, accepted, message):
+        response = {
             "Accepted": accepted,
             "Message": message
         }
-        response_topic = f"auction/bid/response/{client_id}"
-        self.publish_payload(response, response_topic)
-    def auction_timer(self):
-        while self.active_item_id is not None:
+        topic = f"auction/bid/response/{client_id}"
+        self.publish_payload(response, topic)
+    def auction_timer(self, timer_version):
+        last_remaining = None
+        while (
+            self.active_item_id is not None
+            and timer_version == self.timer_version
+        ):
+            if self.auction_deadline is None:
+                break
             remaining = self.auction_deadline - time.monotonic()
             if remaining <= 0:
-                self.admin_commands.put("timer_stop")
+                self.admin_commands.put(f"timer_stop {timer_version}")
                 break
+            remaining_seconds = int(remaining + 0.999999)
+            if remaining_seconds != last_remaining:
+                self.admin_commands.put(
+                    f"timer_update {timer_version} {remaining_seconds}" 
+                )
+                last_remaining = remaining_seconds
             time.sleep(0.2)
 if __name__ == "__main__":
     AuctionServer()

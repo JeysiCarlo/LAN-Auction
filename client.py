@@ -12,6 +12,7 @@ class AuctionClient(BanyanBase):
         self.name = name
         self.console_lock = threading.Lock()
         self.message_processed = threading.Event()
+        self.shutdown_event = threading.Event()
         self.client_id = uuid.uuid4().hex
         self.bid_response_topic = f"auction/bid/response/{self.client_id}"
         super().__init__(
@@ -21,6 +22,13 @@ class AuctionClient(BanyanBase):
         self.set_subscriber_topic("auction/update")
         self.set_subscriber_topic("auction/item/update")
         self.set_subscriber_topic(self.bid_response_topic)
+        self.set_subscriber_topic("auction/timer")
+        self.set_subscriber_topic("auction/lobby/update")
+        join_payload = {
+            "ClientID": self.client_id,
+            "Name": self.name
+        }
+        self.publish_payload(join_payload, "auction/client/join")
         print("\nWelcome to the LAN Auction System")
         print("Role:", self.role.capitalize())
         print("Name:", self.name)
@@ -43,37 +51,41 @@ class AuctionClient(BanyanBase):
             print("\nShutting down client...")
             sys.exit(0)
     def get_item_details(self):
-        while True:
-            print("\n------Submit an Item------")
-            item_name = prompt("Item name: ").strip()
-            while not item_name:
-                print("Item name cannot be empty.")
+        try:
+            while True:
+                print("\n------Submit an Item------")
                 item_name = prompt("Item name: ").strip()
-            description = prompt("item description: ").strip()
-            while not description:
-                print("Description cannot be empty.")
-                description = prompt("Item description: ").strip()
-            try:
-                starting_price = float(
-                    prompt("Starting price(PHP): ")
-                )
-                if starting_price <= 0:
-                    print("Must not be zero or less than zero")
+                while not item_name:
+                    print("Item name cannot be empty.")
+                    item_name = prompt("Item name: ").strip()
+                description = prompt("item description: ").strip()
+                while not description:
+                    print("Description cannot be empty.")
+                    description = prompt("Item description: ").strip()
+                try:
+                    starting_price = float(
+                        prompt("Starting price(PHP): ")
+                    )
+                    if starting_price <= 0:
+                        print("Must not be zero or less than zero")
+                        continue
+                except ValueError:
+                    print("Invalid price. Please enter a number.")
                     continue
-            except ValueError:
-                print("Invalid price. Please enter a number.")
-                continue
-            item = {
-                "Seller": self.name,
-                "Name": item_name,
-                "Description": description,
-                "StartingPrice": starting_price
-            }
-            self.outgoing_queue.put(
-                ("auction/item/submit", item)
-            )
-            self.message_processed.wait()
-            self.message_processed.clear()
+                item = {
+                    "Seller": self.name,
+                    "Name": item_name,
+                    "Description": description,
+                    "StartingPrice": starting_price
+                }
+                self.outgoing_queue.put(
+                    ("auction/item/submit", item)
+                )
+                self.message_processed.wait()
+                self.message_processed.clear()
+        except KeyboardInterrupt:
+            print("\nCLient shutting off...")
+            self.shutdown_event.set()
     def get_bid_amounts(self):
         try:
             while True:
@@ -95,9 +107,11 @@ class AuctionClient(BanyanBase):
                 except ValueError:
                     print("Invalid input. Please enter a valid number.")
         except KeyboardInterrupt:
-            print("\nBid input stopped.")
-
+            print("\nCLient shutting off...")
+            self.shutdown_event.set()
     def process_pending_messages(self):
+        if self.shutdown_event.is_set():
+            raise KeyboardInterrupt
         while not self.outgoing_queue.empty():
             topic, payload = self.outgoing_queue.get()
             self.publish_payload(payload, topic)
@@ -105,6 +119,17 @@ class AuctionClient(BanyanBase):
                     print("\nItem submission sent to the server.")
             self.message_processed.set()
     def incoming_message_processing(self, topic, payload):
+        if topic == "auction/lobby/update":
+            if not isinstance(payload, dict):
+                return
+            clients = payload.get("Clients",[])
+            print("\n---------Lobby--------")
+            if not clients:
+                print("No clients present in the lobby.")
+            else:
+                for client in clients:
+                    print(f"-{client['Name']}")
+            print("------------------------")
         if topic == "auction/item/update":
             if not isinstance(payload, dict):
                 return
@@ -140,6 +165,12 @@ class AuctionClient(BanyanBase):
                 print("\n[BID ACCEPTED]", message)
             else:
                 print("\n[BID REJECTED]", message)
+        elif topic == "auction/timer":
+            if not isinstance(payload, dict):
+                return
+            remaining = payload.get("Remaining")
+            if remaining is not None:
+                print(f"\nAuction Time Remaining: {remaining} seconds")
 def get_user_details():
     print("-------------------------------------")
     print("            LAN AUCTION              ")
