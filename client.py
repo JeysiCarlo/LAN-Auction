@@ -7,6 +7,7 @@ import threading
 import uuid
 import ipaddress
 import socket
+import time
 class AuctionClient(BanyanBase):
     def __init__(self, name, ip_address):
         self.outgoing_queue = queue.Queue()
@@ -24,6 +25,7 @@ class AuctionClient(BanyanBase):
         self.history_response_topic = f"auction/history/response/{self.client_id}"
         self.invitation_remaining = None
         self.auction_remaining = None
+        self.invitation_item_id = None
         super().__init__(
             back_plane_ip_address = ip_address,
             process_name = "Auction Client",
@@ -102,10 +104,38 @@ class AuctionClient(BanyanBase):
     def bottom_toolbar(self):
         parts = []
         if self.invitation_remaining is not None:
-            parts.append(f"Invitation: {self.invitation_remaining}s left")
+            status = {
+                "accept": "you accepted",
+                "reject": "you rejected"
+            }.get(self.invitation_status, "reply pending")
+            parts.append(f"Invitation: {self.invitation_remaining}s left ({status})")
         if self.auction_remaining is not None:
             parts.append(f"Auction: {self.auction_remaining}s left")
         return " | ".join(parts) if parts else "No active timers"
+    def admin_toolbar(self):
+        parts = []
+        invitation_id = self.active_invitation_item_id
+        invitation_deadline = self.invitation_deadline
+        if invitation_id is not None and invitation_deadline is not None:
+            remaining = max(0, int(invitation_deadline - time.monotonic() + 0.999))
+            item = self.items.get(invitation_id)
+            name = item["Name"] if item else "?"
+            parts.append(
+                f"Invitation [{name}]: {remaining}s left | "
+                f"accepted: {len(self.auction_bidders)}"
+            )
+        auction_id = self.active_item_id
+        auction_deadline = self.auction_deadline
+        if auction_id is not None and auction_deadline is not None:
+            remaining = max(0, int(auction_deadline - time.monotonic() + 0.999))
+            item = self.items.get(auction_id)
+            if item:
+                bidder = item.get("HighestBidder") or "no bids"
+                parts.append(
+                    f"Auction [{item['Name']}]: {remaining}s left | "
+                    f"PHP {item.get('CurrentPrice')} ({bidder})"
+                )
+        return " || ".join(parts) if parts else "No active auction"
     def main_input_loop(self):
         try:
             while True:
@@ -120,7 +150,7 @@ class AuctionClient(BanyanBase):
                 print("leave - Exit the auction system")
                 print("help - Show available commands")
                 print("-----------------------------------------")
-                command = prompt("Command: ", bottom_toolbar = self.bottom_toolbar,refresh_interval = 0.5).strip().lower()
+                command = prompt("\nAdmin> ",bottom_toolbar = self.admin_toolbar,refresh_interval = 0.5).strip()
                 parts = command.split()
                 if command == "submit":
                     self.submit_item()
@@ -138,7 +168,6 @@ class AuctionClient(BanyanBase):
                     )
                     self.invitation_status = "accept"
                     self.current_invitation = None
-                    self.invitation_remaining = None 
                     print("You accepted the Invitation.")
                 elif command == "reject":
                     if self.current_invitation is None:
@@ -154,7 +183,6 @@ class AuctionClient(BanyanBase):
                     )
                     self.invitation_status = "reject"
                     self.current_invitation = None
-                    self.invitation_remaining = None 
                     print("You reject the invitation. You can till view the bid")
                 elif command == "bid":
                     if self.invitation_status != "accept":
@@ -271,6 +299,7 @@ class AuctionClient(BanyanBase):
             if payload.get("SellerClientID") == self.client_id:
                 return
             self.current_invitation = payload
+            self.invitation_item_id = payload.get("ItemID")
             self.invitation_status = None
             print("\n-------------Auction Invitation--------------")
             print("Item:", payload.get("Name", "Unknown"))
@@ -281,16 +310,17 @@ class AuctionClient(BanyanBase):
         if topic == "auction/invitation/timer":
             if not isinstance(payload, dict):
                 return
-            if self.current_invitation is None:
+            if self.invitation_item_id is None:
                 return
-            if payload.get("ItemID") != self.current_invitation.get("ItemID"):
+            if payload.get("ItemID") != self.invitation_item_id:
                 return
             self.invitation_remaining = payload.get("Remaining")
         if topic == "auction/item/update":
             if not isinstance(payload, dict):
                 return
             self.auction_active = payload.get("Status") == "active"
-            self.invitation_remaining = None              
+            self.invitation_remaining = None
+            self.invitation_item_id = None                
             if payload.get("Status") != "active":         
                 self.auction_remaining = None             
             if payload.get("Status") == "completed":

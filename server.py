@@ -36,6 +36,7 @@ class AuctionServer(BanyanBase):
         self.set_subscriber_topic("auction/client/join")
         self.set_subscriber_topic("auction/client/leave")
         self.set_subscriber_topic("auction/invitation/response")
+        self.set_subscriber_topic("auction/history/request")
         admin_thread = threading.Thread(
             target = self.admin_input_loop,
             daemon = True
@@ -518,6 +519,58 @@ class AuctionServer(BanyanBase):
                 f"Your bid of PHP {amount} was accepted!"
             )
             self.publish_payload(bid_update, "auction/update")
+        if topic == "auction/history/request":
+            if not isinstance(payload, dict):
+                return
+            client_id = payload.get("ClientID")
+            if client_id not in self.clients:
+                return
+            response_topic = f"auction/history/response/{client_id}"
+            if self.clients[client_id]["State"] != "lobby":
+                self.publish_payload({
+                    "Success": False,
+                    "Message": "History is only available while you are in the lobby."
+                }, response_topic)
+                return
+            auction_id = payload.get("AuctionID")
+            if auction_id is None:
+                summaries = [
+                    {
+                        "ID": a["ID"],
+                        "Name": a["Name"],
+                        "Seller": a["Seller"],
+                        "StartingPrice": a["StartingPrice"],
+                        "FinalPrice": a["FinalPrice"],
+                        "Winner": a["Winner"]
+                    }
+                    for a in self.auction_history.values()
+                ]
+                self.publish_payload({
+                    "Success": True,
+                    "Type": "list",
+                    "Auctions": summaries
+                }, response_topic)
+                return
+            try:
+                auction_id = int(auction_id)
+            except (ValueError, TypeError):
+                self.publish_payload({
+                    "Success": False,
+                    "Message": "Invalid auction ID."
+                }, response_topic)
+                return
+            auction = self.auction_history.get(auction_id)
+            if auction is None:
+                self.publish_payload({
+                    "Success": False,
+                    "Message": "Auction history not found."
+                }, response_topic)
+                return
+            self.publish_payload({
+                "Success": True,
+                "Type": "detail",
+                "Auction": auction
+            }, response_topic)
     def send_bid_response(self, client_id, accepted, message):
         response = {
             "Accepted": accepted,
