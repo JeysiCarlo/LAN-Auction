@@ -50,6 +50,30 @@ class AuctionServer(BanyanBase):
             print("\nShutting down server...")
             self.clean_up()
             sys.exit(0)
+    def admin_toolbar(self):
+        parts = []
+        invitation_id = self.active_invitation_item_id
+        invitation_deadline = self.invitation_deadline
+        if invitation_id is not None and invitation_deadline is not None:
+            remaining = max(0, int(invitation_deadline - time.monotonic() + 0.999))
+            item = self.items.get(invitation_id)
+            name = item["Name"] if item else "?"
+            parts.append(
+                f"Invitation [{name}]: {remaining}s left | "
+                f"accepted: {len(self.auction_bidders)}"
+            )
+        auction_id = self.active_item_id
+        auction_deadline = self.auction_deadline
+        if auction_id is not None and auction_deadline is not None:
+            remaining = max(0, int(auction_deadline - time.monotonic() + 0.999))
+            item = self.items.get(auction_id)
+            if item:
+                bidder = item.get("HighestBidder") or "no bids"
+                parts.append(
+                    f"Auction [{item['Name']}]: {remaining}s left | "
+                    f"PHP {item.get('CurrentPrice')} ({bidder})"
+                )
+        return " || ".join(parts) if parts else "No active auction"
     def admin_input_loop(self):
         print("\n ----Auction Admin-----")
         print("Commands:")
@@ -67,7 +91,11 @@ class AuctionServer(BanyanBase):
         while True:
             self.command_processed.wait()
             self.command_processed.clear()
-            command = prompt("\nAdmin> ").strip()
+            command = prompt(
+                "\nAdmin> ",
+                bottom_toolbar = self.admin_toolbar,
+                refresh_interval = 0.5
+            ).strip()
             self.admin_commands.put(command)
     def process_admin_commands(self):
         processed_any = False

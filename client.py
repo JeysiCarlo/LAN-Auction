@@ -112,30 +112,6 @@ class AuctionClient(BanyanBase):
         if self.auction_remaining is not None:
             parts.append(f"Auction: {self.auction_remaining}s left")
         return " | ".join(parts) if parts else "No active timers"
-    def admin_toolbar(self):
-        parts = []
-        invitation_id = self.active_invitation_item_id
-        invitation_deadline = self.invitation_deadline
-        if invitation_id is not None and invitation_deadline is not None:
-            remaining = max(0, int(invitation_deadline - time.monotonic() + 0.999))
-            item = self.items.get(invitation_id)
-            name = item["Name"] if item else "?"
-            parts.append(
-                f"Invitation [{name}]: {remaining}s left | "
-                f"accepted: {len(self.auction_bidders)}"
-            )
-        auction_id = self.active_item_id
-        auction_deadline = self.auction_deadline
-        if auction_id is not None and auction_deadline is not None:
-            remaining = max(0, int(auction_deadline - time.monotonic() + 0.999))
-            item = self.items.get(auction_id)
-            if item:
-                bidder = item.get("HighestBidder") or "no bids"
-                parts.append(
-                    f"Auction [{item['Name']}]: {remaining}s left | "
-                    f"PHP {item.get('CurrentPrice')} ({bidder})"
-                )
-        return " || ".join(parts) if parts else "No active auction"
     def main_input_loop(self):
         try:
             while True:
@@ -150,7 +126,7 @@ class AuctionClient(BanyanBase):
                 print("leave - Exit the auction system")
                 print("help - Show available commands")
                 print("-----------------------------------------")
-                command = prompt("\nAdmin> ",bottom_toolbar = self.admin_toolbar,refresh_interval = 0.5).strip()
+                command = prompt("Command: ",bottom_toolbar = self.bottom_toolbar,refresh_interval = 0.5).strip().lower()
                 parts = command.split()
                 if command == "submit":
                     self.submit_item()
