@@ -35,6 +35,7 @@ class AuctionClient(BanyanBase):
         self.set_subscriber_topic("auction/invitation")
         self.set_subscriber_topic("auction/invitation/timer")
         self.set_subscriber_topic("auction/lobby/announcement")
+        self.set_subscriber_topic("auction/server/shutdown")
         join_payload = {
             "ClientID": self.client_id,
             "Name": self.name
@@ -323,7 +324,6 @@ class AuctionClient(BanyanBase):
             if not payload.get("Success"):
                 print("\n[History]", payload.get("Message", "Request failed."))
                 return
-
             if payload.get("Type") == "list":
                 auctions = payload.get("Auctions", [])
                 print("\n---------------Auction History-----------------")
@@ -368,6 +368,12 @@ class AuctionClient(BanyanBase):
             if remaining == 0:
                 print()
             self.last_auction_timer_remaining = remaining
+        elif topic == "auction/server/shutdown":
+            if not isinstance(payload, dict):
+                return
+            print("\n[Server]", payload.get("Message", "Server is shutting down."))
+            print("Disconnecting...")
+    self.shutdown_event.set()
 def get_user_details():
     print("-------------------------------------")
     print("            LAN AUCTION              ")

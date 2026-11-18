@@ -59,6 +59,7 @@ class AuctionServer(BanyanBase):
         print("stop")
         print("history")
         print("history <ID>")
+        print("exit")
         print("help")
         print("--------------------------------")
         print()
@@ -267,6 +268,17 @@ class AuctionServer(BanyanBase):
                             "| Amount: PHP", bid["Amount"]
                         )
                 print("------------------------------------------------------")
+            elif action in ["exit", "shutdown", "quit"]:
+                force = len(parts) == 2 and parts[1].lower() == "force"
+                auction_busy = (
+                    self.active_item_id is not None
+                    or self.active_invitation_item_id is not None
+                )
+                if auction_busy and not force:
+                    print("An auction or invitation is still in progress.")
+                    print("Type 'stop' to end it first, or 'exit force' to quit anyway.")
+                    continue
+                self.shutdown_server()
             elif action == "help":
                 print("\nAvailable commands:")
                 print("list")
@@ -276,10 +288,24 @@ class AuctionServer(BanyanBase):
                 print("stop")
                 print("History")
                 print("History <ID>")
+                print("exit")
+                print("exit force")
             else:
                 print("Unknown command. Type help")
         if processed_any:
             self.command_processed.set()
+    def shutdown_server(self):
+        print("\nShutting down server...")
+        self.active_invitation_item_id = None
+        self.invitation_deadline = None
+        self.active_item_id = None
+        self.auction_deadline = None
+        self.timer_version += 1
+        self.publish_payload(
+        {"Message": "The auction server is shutting down."},
+        "auction/server/shutdown")
+        time.sleep(0.5)
+        raise KeyboardInterrupt
     def incoming_message_processing(self, topic, payload):
         with self.console_lock:
             print("\n--Incoming message received--")
