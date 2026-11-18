@@ -15,6 +15,12 @@ class AuctionServer(BanyanBase):
         self.items = {}
         self.auction_history = {}
         self.clients = {}
+        self.auction_invitation_responses = {}
+        self.auction_bidders = set()
+        self.active_invitation_item_id = None
+        self.invitation_duration = 10
+        self.invitation_deadline = None
+        self.invitation_thread = None
         self.next_item_id = 1
         self.active_item_id = None
         self.auction_duration = 30
@@ -29,6 +35,7 @@ class AuctionServer(BanyanBase):
         self.set_subscriber_topic("auction/item/submit")
         self.set_subscriber_topic("auction/client/join")
         self.set_subscriber_topic("auction/client/leave")
+        self.set_subscriber_topic("auction/invitation/response")
         admin_thread = threading.Thread(
             target = self.admin_input_loop,
             daemon = True
@@ -83,6 +90,39 @@ class AuctionServer(BanyanBase):
                 }
                 self.publish_payload(timer_update, "auction/timer")
                 continue
+            if action == "invitation_finish":
+                if len(parts) != 2:
+                    continue
+                item_id = int(parts[1])
+                if self.active_invitation_item_id != item_id:
+                    continue
+                item = self.items[item_id]
+                for client_id, client in self.clients.items():
+                    if client_id == item["SellerClientID"]:
+                        continue
+                    if client_id not in self.auction_invitation_responses:
+                        client["State"] = "spectator"
+                self.active_invitation_item_id = None
+                self.invitation_deadline = None
+                item["Status"] = "active"
+                item["CurrentPrice"] = item["StartingPrice"]
+                item["HighestBidder"] = None
+                item["BidHistory"] = []
+                self.active_item_id = item_id
+                self.auction_deadline = time.monotonic() + self.auction_duration
+                self.timer_version += 1
+                current_timer_version = self.timer_version
+                self.timer_thread = threading.Thread(
+                    target = self.auction_timer,
+                    args = (current_timer_version,),
+                    daemon = True
+                )
+                self.timer_thread.start()
+                self.publish_payload(item, "auction/item/update")
+                print("\nAuction Started!")
+                print("Item:", item["Name"])
+                print("Auction duration:", self.auction_duration, "seconds")
+                continue
             if action == "list":
                 if not self.items:
                     print("No items submitted for auction.")
@@ -119,27 +159,29 @@ class AuctionServer(BanyanBase):
                     if item["Status"] != "approved":
                         print("Approve the item before starting the auction.")
                         continue
-                    if self.active_item_id is not None:
-                        print("Another auction is already active")
+                    if (
+                        self.active_item_id is not None
+                        or self.active_invitation_item_id is not None
+                    ):
+                        print("Another auction or invitation is already active.")
                         continue
-                    item["Status"] = "active"
-                    item["CurrentPrice"] = item["StartingPrice"]
-                    item["HighestBidder"] = None
-                    item["BidHistory"] = []
-                    self.active_item_id = item_id
-                    self.auction_deadline = time.monotonic() + self.auction_duration
-                    self.timer_version += 1
-                    current_timer_version = self.timer_version
-                    self.timer_thread = threading.Thread(
-                        target = self.auction_timer,
-                        args = (current_timer_version,),
+                    self.active_invitation_item_id = item_id
+                    self.invitation_deadline = (
+                        time.monotonic() + self.invitation_duration
+                    )
+                    self.send_auction_invitations(item, item_id)
+                    print("\n Waiting for invitation responses....")
+                    print(
+                        "Invitation duration:",
+                        self.invitation_duration,
+                        "seconds"
+                    )
+                    self.invitation_thread = threading.Thread(
+                        target = self.invitation_timer,
+                        args = (item_id,),
                         daemon = True
                     )
-                    self.timer_thread.start()
-                    self.publish_payload(item, "auction/item/update")
-                    print("\nAuction Started!")
-                    print("Item:", item["Name"])
-                    print("Auction duration:", self.auction_duration, "seconds")
+                    self.invitation_thread.start()
             elif action in ["stop", "timer_stop"]:
                 if action == "timer_stop":
                     if len(parts) < 2:
@@ -175,6 +217,10 @@ class AuctionServer(BanyanBase):
                 self.active_item_id = None
                 self.auction_deadline = None
                 self.timer_version += 1
+                self.auction_bidders.clear()
+                self.auction_invitation_responses.clear()
+                for client in self.clients.values():
+                    client["State"] = "lobby"
             elif action == "history" and len(parts) == 1:
                 if not self.auction_history:
                     print("No completed auctions yet.")
@@ -240,6 +286,39 @@ class AuctionServer(BanyanBase):
             print("Topic:", topic)
             print("Payload:", repr(payload))
             print("Payload type:", type(payload).__name__)
+        if topic == "auction/invitation/response":
+            if not isinstance(payload, dict):
+                return
+            client_id = payload.get("ClientID")
+            item_id = payload.get("ItemID")
+            response = payload.get("Response")
+            if self.active_invitation_item_id is None:
+                return
+            if (
+                self.invitation_deadline is None
+                or time.monotonic() >= self.invitation_deadline
+            ):
+                return
+            if item_id != self.active_invitation_item_id:
+                return
+            if client_id not in self.clients:
+                return
+            if response not in ["accept", "reject"]:
+                return
+            if client_id in self.auction_invitation_responses:
+                return
+            item = self.items[self.active_invitation_item_id]
+            if client_id == item["SellerClientID"]:
+                return
+            self.auction_invitation_responses[client_id] = response
+            if response == "accept":
+                self.auction_bidders.add(client_id)
+                self.clients[client_id]["State"] = "bidder"
+                print(f"\n[Invitation] {self.clients[client_id]['Name']} accepted.")
+            else:
+                self.auction_bidders.discard(client_id)
+                self.clients[client_id]["State"] = "spectator"
+                print(f"\n[Invitation] {self.clients[client_id]['Name']} rejected.")
         if topic == "auction/client/join":
             if not isinstance(payload, dict):
                 return
@@ -247,24 +326,48 @@ class AuctionServer(BanyanBase):
             name = payload.get("Name")
             if not client_id or not name:
                 return
-            self.clients[client_id] ={
+            if (
+                self.active_item_id is not None
+                or self.active_invitation_item_id is not None
+            ):
+                state = "spectator"
+            else: 
+                state = "lobby"
+            self.clients[client_id] = {
                 "ClientID": client_id,
                 "Name": name,
-                "State": "lobby"
+                "State": state
             }
+            print(f"[Lobby] {name}'s state: {self.clients[client_id]['State']}")
             print(f"\n[Lobby] {name} joined the lobby.")
+            announcement = {
+                "Message": f"{name} joined the lobby."
+            }
+            self.publish_payload(
+                announcement,
+                "auction/lobby/announcement"
+            )
             lobby_update = {
                 "Clients": list(self.clients.values())
             }
-            self.publish_payload(lobby_update, "auction,lobby,update")
+            self.publish_payload(lobby_update, "auction/lobby/update")
         elif topic == "auction/client/leave":
             if not isinstance(payload, dict):
                 return
             client_id = payload.get("ClientID")
             if client_id in self.clients:
-                name = self.clients[self.client_id]["Name"]
+                name = self.clients[client_id]["Name"]
+                self.auction_bidders.discard(client_id)
+                self.auction_invitation_responses.pop(client_id, None)
                 del self.clients[client_id]
                 print(f"\n[Lobby] {name} left the lobby.")
+                announcement = {
+                    "Message": f"{name} left the lobby."
+                }
+                self.publish_payload(
+                    announcement,
+                    "auction/lobby/announcement"
+                )
                 lobby_update = {
                     "Clients": list (self.clients.values())
                 }
@@ -277,7 +380,8 @@ class AuctionServer(BanyanBase):
                 "Seller",
                 "Name",
                 "Description",
-                "StartingPrice"
+                "StartingPrice",
+                "SellerClientID"
             ]
             if not all(field in payload for field in required_fields):
                 print("Invalid item submission")
@@ -298,7 +402,8 @@ class AuctionServer(BanyanBase):
                 "Name": str(payload["Name"]),
                 "Description": str(payload["Description"]),
                 "StartingPrice": starting_price,
-                "Status": "pending"
+                "Status": "pending",
+                "SellerClientID": payload["SellerClientID"]
             }
             self.items[item_id] = item
             print("\n========== NEW ITEM ==========")
@@ -320,6 +425,11 @@ class AuctionServer(BanyanBase):
                 message = "There is no active auction."
                 print("Bid rejected:", message)
                 self.send_bid_response(client_id, False, message)
+                return
+            if client_id not in self.auction_bidders:
+                message = "You are not an accepted bidder for this auction."
+                print("Bid rejected:", message)
+                self.send_bid_response(client_id,False,message)
                 return
             if "Bidder" not in payload or "Amount" not in payload:
                 message = "Missing Bidder or Amount."
@@ -408,5 +518,33 @@ class AuctionServer(BanyanBase):
                 )
                 last_remaining = remaining_seconds
             time.sleep(0.2)
+    def invitation_timer(self, item_id):
+        while self.active_invitation_item_id == item_id:
+            remaining = self.invitation_deadline - time.monotonic()
+            if remaining <= 0:
+                self.admin_commands.put(
+                    f"invitation_finish {item_id}"
+                )
+                break
+            self.publish_payload(
+                {"ItemID": item_id, "Remaining": int(remaining)},
+                "auction/invitation/timer"
+            )
+            time.sleep(1)
+    def send_auction_invitations(self, item, item_id):
+        self.auction_invitation_responses.clear()
+        self.auction_bidders.clear()
+        invitation = {
+            "ItemID": item_id,
+            "Name": item["Name"],
+            "Seller": item["Seller"],
+            "StartingPrice": item["StartingPrice"],
+            "SellerClientID": item["SellerClientID"]
+        }       
+        self.publish_payload(
+            invitation,
+            "auction/invitation"
+        )
+        print("\nInvitations sent to lobby clients.")
 if __name__ == "__main__":
     AuctionServer()
