@@ -6,6 +6,7 @@ import queue
 import threading
 import uuid
 import ipaddress
+import socket
 class AuctionClient(BanyanBase):
     def __init__(self, name, ip_address):
         self.outgoing_queue = queue.Queue()
@@ -21,6 +22,8 @@ class AuctionClient(BanyanBase):
         self.last_auction_timer_remaining = None
         self.bid_response_topic = f"auction/bid/response/{self.client_id}"
         self.history_response_topic = f"auction/history/response/{self.client_id}"
+        self.invitation_remaining = None
+        self.auction_remaining = None
         super().__init__(
             back_plane_ip_address = ip_address,
             process_name = "Auction Client",
@@ -96,6 +99,13 @@ class AuctionClient(BanyanBase):
         except KeyboardInterrupt:
             print("\nClient shutting off...")
             self.shutdown_event.set()
+    def bottom_toolbar(self):
+        parts = []
+        if self.invitation_remaining is not None:
+            parts.append(f"Invitation: {self.invitation_remaining}s left")
+        if self.auction_remaining is not None:
+            parts.append(f"Auction: {self.auction_remaining}s left")
+        return " | ".join(parts) if parts else "No active timers"
     def main_input_loop(self):
         try:
             while True:
@@ -110,7 +120,7 @@ class AuctionClient(BanyanBase):
                 print("leave - Exit the auction system")
                 print("help - Show available commands")
                 print("-----------------------------------------")
-                command = prompt("Command: ").strip().lower()
+                command = prompt("Command: ", bottom_toolbar = self.bottom_toolbar,refresh_interval = 0.5).strip().lower()
                 parts = command.split()
                 if command == "submit":
                     self.submit_item()
@@ -128,6 +138,7 @@ class AuctionClient(BanyanBase):
                     )
                     self.invitation_status = "accept"
                     self.current_invitation = None
+                    self.invitation_remaining = None 
                     print("You accepted the Invitation.")
                 elif command == "reject":
                     if self.current_invitation is None:
@@ -143,6 +154,7 @@ class AuctionClient(BanyanBase):
                     )
                     self.invitation_status = "reject"
                     self.current_invitation = None
+                    self.invitation_remaining = None 
                     print("You reject the invitation. You can till view the bid")
                 elif command == "bid":
                     if self.invitation_status != "accept":
@@ -273,17 +285,14 @@ class AuctionClient(BanyanBase):
                 return
             if payload.get("ItemID") != self.current_invitation.get("ItemID"):
                 return
-            remaining = payload.get("Remaining")
-            if remaining is not None:
-                print(
-                    f"\rInvitation Time Remaining: {remaining} seconds",
-                    end="",
-                    flush=True
-                )
+            self.invitation_remaining = payload.get("Remaining")
         if topic == "auction/item/update":
             if not isinstance(payload, dict):
                 return
             self.auction_active = payload.get("Status") == "active"
+            self.invitation_remaining = None              
+            if payload.get("Status") != "active":         
+                self.auction_remaining = None             
             if payload.get("Status") == "completed":
                 self.invitation_status = None
             print("\n------Auction Item Update-------")
@@ -359,37 +368,43 @@ class AuctionClient(BanyanBase):
             if not isinstance(payload, dict):
                 return
             remaining = payload.get("Remaining")
-            if remaining is not None:
-                print(
-                    f"\rAuction Time Remaining: {remaining} seconds",
-                    end="",
-                    flush=True
-                )
-            if remaining == 0:
-                print()
+            self.auction_remaining = remaining if remaining else None
             self.last_auction_timer_remaining = remaining
         elif topic == "auction/server/shutdown":
             if not isinstance(payload, dict):
                 return
             print("\n[Server]", payload.get("Message", "Server is shutting down."))
             print("Disconnecting...")
-    self.shutdown_event.set()
+            self.shutdown_event.set()
+def backplane_reachable(ip_address, timeout = 3):
+    for port in (43124, 43125):
+        try:
+            with socket.create_connection((ip_address, port), timeout=timeout):
+                pass
+        except OSError:
+            return False
+    return True
 def get_user_details():
     print("-------------------------------------")
     print("            LAN AUCTION              ")
     print("-------------------------------------")
     while True:
-        ip_address = input("Enter trhe server IP address: ").strip()
+        ip_address = input("Enter the server IP address: ").strip()
         try:
-            ipaddress.ip_address(ipaddress)
-            break
+            ipaddress.ip_address(ip_address)
         except ValueError:
             print("Invalid IP address. Example: 192.168.1.10")
+            continue
+        print("Checking connection...")
+        if backplane_reachable(ip_address):
+            break
+        print("Cannot reach the backplane at that address.")
+        print("Check the IP, make sure the backplane is running, and that both devices are on the same network.")
     name = input("Enter your display name: ").strip()
     while not name:
         print("Name cannot be empty.")
         name = input("Enter your display name: ").strip()
     return ip_address, name
 if __name__ == "__main__":
-    name = get_user_details()
-    AuctionClient(name)
+    ip_address, name = get_user_details()
+    AuctionClient(name, ip_address)

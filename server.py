@@ -18,12 +18,12 @@ class AuctionServer(BanyanBase):
         self.auction_invitation_responses = {}
         self.auction_bidders = set()
         self.active_invitation_item_id = None
-        self.invitation_duration = 10
+        self.invitation_duration = 30
         self.invitation_deadline = None
         self.invitation_thread = None
         self.next_item_id = 1
         self.active_item_id = None
-        self.auction_duration = 30
+        self.auction_duration = 60
         self.auction_deadline = None
         self.timer_thread = None
         self.timer_version = 0
